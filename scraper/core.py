@@ -1,3 +1,4 @@
+import os
 import json, re, sqlite3, time, csv, io
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -9,6 +10,7 @@ DB_PATH = "data/products.sqlite3"
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; ProductResearchBot/1.0; +local-user-tool)"}
 
 def db():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
     return con
