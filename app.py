@@ -33,7 +33,7 @@ c1.metric("Kayıtlı ürün", products_count)
 c2.metric("Pilot hedefi", int(limit))
 c3.metric("Veritabanı", "SQLite")
 
-tab1, tab2, tab3, tab4 = st.tabs(["Ürünleri keşfet", "Metinden ürün ekle", "Ürünleri görüntüle", "Dışa aktar"])
+tab1, tab2, tab3, tab4 = st.tabs(["URL ile ürün ekle", "Metin aktarımı", "Ürünleri görüntüle", "Dışa aktar"])
 
 with tab1:
     st.subheader("1. Sitemap'ten ürün URL'lerini keşfet")
@@ -59,14 +59,15 @@ with tab1:
                 status.write(f"{i}/{total} — {url} — {result}")
             try:
                 results = scrape_urls(urls[:int(limit)], delay_seconds=int(delay), callback=update)
-                ok = sum(1 for x in results if x.get("status") == "ok")
-                st.success(f"Pilot tamamlandı: {ok}/{len(results)} ürün başarıyla kaydedildi.")
+                ready = sum(1 for x in results if x.get("status") == "ready_for_review")
+                review = sum(1 for x in results if x.get("status") == "needs_review")
+                st.info(f"İşlem tamamlandı: {ready} incelenmeye hazır, {review} eksik bilgi içeriyor. Engellenen kayıtlar kaydedilmedi.")
                 st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
             except Exception as e:
                 st.error(f"Tarama sırasında hata: {e}")
 
     st.divider()
-    st.subheader("2. Manuel ürün linki")
+    st.subheader("2. Ürün URL'si ile otomatik aktarım")
     manual = st.text_area("Ürün URL'lerini gir (her satıra bir URL)", placeholder="https://www.pluspowersupplements.com/100-whey-isolate-1816gr")
     if st.button("Manuel linkleri tara"):
         manual_urls = [x.strip() for x in manual.splitlines() if x.strip()]
@@ -75,12 +76,12 @@ with tab1:
         else:
             with st.spinner("Ürünler taranıyor..."):
                 results = scrape_urls(manual_urls, delay_seconds=int(delay))
-            st.success(f"İşlem tamamlandı: {sum(x.get('status')=='ok' for x in results)}/{len(results)} başarılı.")
+            st.info(f"İşlem tamamlandı: {sum(x.get('status')=='ready_for_review' for x in results)} incelenmeye hazır; {sum(x.get('status')=='blocked_or_failed' for x in results)} başarısız/engelli.")
             st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
 
 with tab2:
-    st.subheader("Safari'den kopyaladığın ürün bilgisini ekle")
-    st.write("iPhone'da ürün sayfasını aç → sayfa metnini kopyala → aşağıya yapıştır. Uygulama bulabildiği alanları otomatik çıkarır.")
+    st.subheader("İsteğe bağlı metin aktarımı")
+    st.write("Bu bölüm yalnızca URL ile erişim mümkün olmadığında yedek yöntemdir. Ana yöntem ürün URL’sini otomatik analiz etmektir.")
     pasted_url = st.text_input("Ürün sayfasının URL'si", placeholder="https://www.pluspowersupplements.com/100-whey-isolate-1816gr")
     pasted_text = st.text_area("Kopyalanan ürün metni", height=320, placeholder="Ürün sayfasındaki metni buraya yapıştır...")
     if st.button("Metni analiz et", type="primary"):
@@ -89,7 +90,7 @@ with tab2:
         else:
             parsed = parse_pasted_product(pasted_text, pasted_url)
             st.session_state["pasted_product"] = parsed
-            st.success("Metin analiz edildi. Kaydetmeden önce alanları kontrol et.")
+            st.warning("Metin analiz edildi; otomatik doğrulanmış sayılmaz. Kaydetmeden önce alanları kontrol et.")
     parsed = st.session_state.get("pasted_product")
     if parsed:
         st.markdown("#### Bulunan ürün bilgileri")
@@ -110,7 +111,7 @@ with tab2:
             parsed.update({"title": edit_title, "brand": edit_brand, "price": edit_price,
                            "ean": edit_ean, "sku": edit_sku, "source_url": edit_url,
                            "description": edit_description, "ingredients": edit_ingredients,
-                           "nutrition": edit_nutrition, "status": "ok" if edit_title else "partial"})
+                           "nutrition": edit_nutrition, "status": "needs_review"})
             if not edit_url.strip():
                 st.error("Kaydetmek için ürün URL'si gerekli.")
             else:
