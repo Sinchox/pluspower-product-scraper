@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from scraper.core import (
     init_db, list_products, count_products, import_sitemap,
-    scrape_urls, export_csv, get_product, delete_all_products
+    scrape_urls, export_csv, get_product, delete_all_products, parse_pasted_product, save_product
 )
 
 st.set_page_config(page_title="PlusPower Product Scraper", page_icon="🛒", layout="wide")
@@ -33,7 +33,7 @@ c1.metric("Kayıtlı ürün", products_count)
 c2.metric("Pilot hedefi", int(limit))
 c3.metric("Veritabanı", "SQLite")
 
-tab1, tab2, tab3 = st.tabs(["Ürünleri keşfet", "Ürünleri görüntüle", "Dışa aktar"])
+tab1, tab2, tab3, tab4 = st.tabs(["Ürünleri keşfet", "Metinden ürün ekle", "Ürünleri görüntüle", "Dışa aktar"])
 
 with tab1:
     st.subheader("1. Sitemap'ten ürün URL'lerini keşfet")
@@ -79,6 +79,46 @@ with tab1:
             st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
 
 with tab2:
+    st.subheader("Safari'den kopyaladığın ürün bilgisini ekle")
+    st.write("iPhone'da ürün sayfasını aç → sayfa metnini kopyala → aşağıya yapıştır. Uygulama bulabildiği alanları otomatik çıkarır.")
+    pasted_url = st.text_input("Ürün sayfasının URL'si", placeholder="https://www.pluspowersupplements.com/100-whey-isolate-1816gr")
+    pasted_text = st.text_area("Kopyalanan ürün metni", height=320, placeholder="Ürün sayfasındaki metni buraya yapıştır...")
+    if st.button("Metni analiz et", type="primary"):
+        if not pasted_text.strip():
+            st.warning("Önce ürün sayfasından kopyaladığın metni yapıştır.")
+        else:
+            parsed = parse_pasted_product(pasted_text, pasted_url)
+            st.session_state["pasted_product"] = parsed
+            st.success("Metin analiz edildi. Kaydetmeden önce alanları kontrol et.")
+    parsed = st.session_state.get("pasted_product")
+    if parsed:
+        st.markdown("#### Bulunan ürün bilgileri")
+        col1, col2 = st.columns(2)
+        with col1:
+            edit_title = st.text_input("Ürün adı", value=parsed.get("title", ""))
+            edit_brand = st.text_input("Marka", value=parsed.get("brand", ""))
+            edit_price = st.text_input("Fiyat (€)", value=parsed.get("price", ""))
+            edit_ean = st.text_input("EAN", value=parsed.get("ean", ""))
+            edit_sku = st.text_input("Ürün kodu / SKU", value=parsed.get("sku", ""))
+        with col2:
+            edit_url = st.text_input("Kaynak URL", value=parsed.get("source_url", ""))
+            st.caption("Stok, görseller ve varyantlar kopyalanan metinde yoksa boş kalır.")
+        edit_description = st.text_area("Açıklama", value=parsed.get("description", ""), height=130)
+        edit_ingredients = st.text_area("İçindekiler", value=parsed.get("ingredients", ""), height=130)
+        edit_nutrition = st.text_area("Besin değerleri", value=parsed.get("nutrition", ""), height=180)
+        if st.button("Ürünü veritabanına kaydet"):
+            parsed.update({"title": edit_title, "brand": edit_brand, "price": edit_price,
+                           "ean": edit_ean, "sku": edit_sku, "source_url": edit_url,
+                           "description": edit_description, "ingredients": edit_ingredients,
+                           "nutrition": edit_nutrition, "status": "ok" if edit_title else "partial"})
+            if not edit_url.strip():
+                st.error("Kaydetmek için ürün URL'si gerekli.")
+            else:
+                save_product(parsed)
+                st.success("Ürün kaydedildi. Ürünleri görüntüle bölümünde bulabilirsin.")
+                st.session_state.pop("pasted_product", None)
+
+with tab3:
     st.subheader("Kayıtlı ürünler")
     q = st.text_input("Ürün adı veya marka ara")
     rows = list_products(search=q)
@@ -94,7 +134,7 @@ with tab2:
     else:
         st.info("Henüz ürün kaydı yok. Önce sitemap'i okuyup pilot tarama yap.")
 
-with tab3:
+with tab4:
     st.subheader("CSV dışa aktarımı")
     st.write("Excel ile açılabilen UTF-8 CSV dosyası oluşturur.")
     csv_bytes = export_csv()
