@@ -7,6 +7,10 @@ from scraper.core import (
 
 st.set_page_config(page_title="PlusPower Product Scraper", page_icon="🛒", layout="wide")
 init_db()
+try:
+    tavily_api_key = st.secrets.get("TAVILY_API_KEY", "")
+except Exception:
+    tavily_api_key = ""
 
 st.markdown("""
 <style>
@@ -25,7 +29,7 @@ with st.sidebar:
     sitemap_url = st.text_input("Sitemap URL", "https://www.pluspowersupplements.com/sitemap.xml")
     delay = st.number_input("İstekler arası bekleme (saniye)", min_value=5, max_value=60, value=5, step=1)
     limit = st.number_input("Pilot ürün sayısı", min_value=1, max_value=100, value=10, step=1)
-    st.caption("Varsayılan bekleme 5 saniyedir. Site erişimi ve robots.txt kurallarına uyun.")
+    st.caption("Varsayılan bekleme 5 saniyedir. 403 durumunda yapılandırılmış Tavily Extract yedeği denenir; erişim kısıtlaması aşılmaz.")
 
 products_count = count_products()
 c1,c2,c3 = st.columns(3)
@@ -58,7 +62,7 @@ with tab1:
                 progress.progress(min(i/total,1.0))
                 status.write(f"{i}/{total} — {url} — {result}")
             try:
-                results = scrape_urls(urls[:int(limit)], delay_seconds=int(delay), callback=update)
+                results = scrape_urls(urls[:int(limit)], delay_seconds=int(delay), callback=update, tavily_api_key=tavily_api_key)
                 ready = sum(1 for x in results if x.get("status") == "ready_for_review")
                 review = sum(1 for x in results if x.get("status") == "needs_review")
                 st.info(f"İşlem tamamlandı: {ready} incelenmeye hazır, {review} eksik bilgi içeriyor. Engellenen kayıtlar kaydedilmedi.")
@@ -68,6 +72,7 @@ with tab1:
 
     st.divider()
     st.subheader("2. Ürün URL'si ile otomatik aktarım")
+    st.caption("Tavily anahtarı bağlıysa doğrudan erişim 403 verdiğinde Extract API yedek kaynak olarak denenir.")
     manual = st.text_area("Ürün URL'lerini gir (her satıra bir URL)", placeholder="https://www.pluspowersupplements.com/100-whey-isolate-1816gr")
     if st.button("Manuel linkleri tara"):
         manual_urls = [x.strip() for x in manual.splitlines() if x.strip()]
@@ -75,7 +80,7 @@ with tab1:
             st.warning("En az bir ürün URL'si gir.")
         else:
             with st.spinner("Ürünler taranıyor..."):
-                results = scrape_urls(manual_urls, delay_seconds=int(delay))
+                results = scrape_urls(manual_urls, delay_seconds=int(delay), tavily_api_key=tavily_api_key)
             st.info(f"İşlem tamamlandı: {sum(x.get('status')=='ready_for_review' for x in results)} incelenmeye hazır; {sum(x.get('status')=='blocked_or_failed' for x in results)} başarısız/engelli.")
             st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
 
