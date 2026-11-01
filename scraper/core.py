@@ -289,32 +289,182 @@ def _parse_tavily_result(url, result):
     }
 
 
+def _tavily_headers(api_key):
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+def _tavily_error(response, payload=None):
+    """Return a safe, useful provider error without exposing credentials."""
+    if isinstance(payload, dict):
+        err = payload.get("error")
+        if isinstance(err, dict):
+            msg = err.get("message") or err.get("detail") or err.get("code")
+            if msg:
+                return str(msg)[:500]
+        elif err:
+            return str(err)[:500]
+        failed = payload.get("failed_results") or []
+        if failed:
+            bits=[]
+            for item in failed[:3]:
+                if isinstance(item, dict):
+                    bits.append(str(item.get("error") or item.get("message") or "URL çıkarılamadı"))
+            if bits: return "; ".join(bits)[:500]
+    try:
+        body = response.text[:350].replace("\\n", " ")
+    except Exception:
+        body = ""
+    return body or f"Tavily HTTP {response.status_code}"
+
+def _tavily_post(endpoint, payload, api_key, timeout=60):
+    response = requests.post(
+        f"https://api.tavily.com/{endpoint}",
+        json=payload,
+        headers=_tavily_headers(api_key),
+        timeout=timeout,
+    )
+    try:
+        data = response.json()
+    except Exception:
+        data = {}
+    if not response.ok:
+        raise RuntimeError(f"Tavily {endpoint} hatası (HTTP {response.status_code}): {_tavily_error(response, data)}")
+    return data
+
+def _tavily_extract(url, api_key):
+    payload = _tavily_post("extract", {
+        "urls": [url],
+        "extract_depth": "advanced",
+        "format": "markdown",
+        "include_images": True,
+    }, api_key, timeout=65)
+    results = payload.get("results") or []
+    if results:
+        return results[0], payload
+    failed = payload.get("failed_results") or []
+    reason = _tavily_error(type("Response", (), {"status_code": 200, "text": ""})(), payload)
+    raise RuntimeError(f"Extract başarısız: {reason}")
+
+def _tavily_search_candidates(url, api_key):
+    parsed = urlparse(url)
+    slug = parsed.path.rstrip("/").split("/")[-1].replace("-", " ").replace("_", " ")
+    query = f'site:{parsed.netloc} "{slug}"'
+    payload = _tavily_post("search", {
+        "query": query,
+        "search_depth": "basic",
+        "max_results": 5,
+        "include_raw_content": "markdown",
+        "include_domains": [parsed.netloc],
+    }, api_key, timeout=45)
+    candidates=[]
+    for result in payload.get("results") or []:
+        candidate = result.get("url", "") if isinstance(result, dict) else ""
+        cp = urlparse(candidate)
+        if cp.scheme in ("http", "https") and cp.netloc.lower() == parsed.netloc.lower():
+            if candidate not in candidates:
+                candidates.append(candidate)
+    return candidates, payload
+
+def _tavily_post(endpoint, payload, api_key):
+    """Call Tavily using Bearer authentication."""
+    response = requests.post(
+        "https://api.tavily.com/" + endpoint,
+        json=payload,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        timeout=60,
+    )
+    if response.status_code in (401, 403):
+        raise RuntimeError(
+            f"Tavily API kimlik doğrulama/izin hatası (HTTP {response.status_code}). "
+            "Streamlit Secrets içindeki TAVILY_API_KEY değerini kontrol et."
+        )
+    if response.status_code == 429:
+        raise RuntimeError("Tavily API kullanım limiti aşıldı (HTTP 429). Bir süre sonra tekrar dene.")
+    if not response.ok:
+        detail = response.text[:500].replace("\n", " ")
+        raise RuntimeError(f"Tavily {endpoint} HTTP {response.status_code}: {detail}")
+    try:
+        return response.json()
+    except ValueError:
+        raise RuntimeError(f"Tavily {endpoint} geçerli JSON döndürmedi.")
+
+
 def tavily_extract_product(url, api_key):
     if not api_key:
         raise RuntimeError("Tavily API anahtarı tanımlı değil. Streamlit Secrets içinde TAVILY_API_KEY ayarını kontrol et.")
-    response = requests.post(
-        "https://api.tavily.com/extract",
-        json={
-            "api_key": api_key,
-            "urls": [url],
-            "extract_depth": "advanced",
-            "format": "markdown",
-            "include_images": True,
-            "timeout": 45
-        },
-        headers={"Content-Type": "application/json"},
-        timeout=60
-    )
-    if response.status_code in (401, 403):
-        raise RuntimeError(f"Tavily API erişim hatası (HTTP {response.status_code}); API anahtarını ve hesabı kontrol et.")
-    response.raise_for_status()
-    payload = response.json()
-    results = payload.get("results") or []
-    if not results:
+
+    extract_error = ""
+    try:
+        payload = _tavily_post(
+            "extract",
+            {"urls": [url], "extract_depth": "advanced", "format": "markdown", "include_images": True},
+            api_key,
+        )
+        results = payload.get("results") or []
+        if results and results[0].get("raw_content"):
+            item = _parse_tavily_result(url, results[0])
+            item["error"] = "Tavily Extract kaynağı; alanlar doğrulanmalı."
+            return item
         failed = payload.get("failed_results") or []
-        reason = failed[0].get("error", "Tavily sayfadan içerik çıkaramadı.") if failed else "Tavily boş sonuç döndürdü."
-        raise RuntimeError(reason)
-    return _parse_tavily_result(url, results[0])
+        extract_error = str(failed[0].get("error") or failed[0])[:400] if failed else "Extract başarılı içerik döndürmedi."
+    except Exception as exc:
+        extract_error = str(exc)[:400]
+
+    parsed_url = urlparse(url)
+    slug = parsed_url.path.rstrip("/").split("/")[-1]
+    query = f'site:{parsed_url.netloc} "{slug}"'
+    try:
+        search_payload = _tavily_post(
+            "search",
+            {
+                "query": query,
+                "topic": "general",
+                "search_depth": "advanced",
+                "max_results": 5,
+                "include_domains": ["pluspowersupplements.com"],
+                "include_raw_content": "advanced",
+                "include_answer": False,
+            },
+            api_key,
+        )
+        candidates = search_payload.get("results") or []
+        for candidate in candidates:
+            candidate_url = candidate.get("url", "")
+            cp = urlparse(candidate_url)
+            candidate_slug = cp.path.rstrip("/").split("/")[-1]
+            if cp.netloc not in ("www.pluspowersupplements.com", "pluspowersupplements.com"):
+                continue
+            if candidate_slug.lower() != slug.lower():
+                continue
+            raw = candidate.get("raw_content") or candidate.get("content") or ""
+            if raw.strip():
+                item = _parse_tavily_result(url, {"raw_content": raw, "images": []})
+                item["error"] = "Tavily Search yedeği kullanıldı; kaynak sayfa ile karşılaştırıp doğrula."
+                return item
+            retry = _tavily_post(
+                "extract",
+                {"urls": [candidate_url], "extract_depth": "advanced", "format": "markdown", "include_images": True},
+                api_key,
+            )
+            retry_results = retry.get("results") or []
+            if retry_results and retry_results[0].get("raw_content"):
+                item = _parse_tavily_result(url, retry_results[0])
+                item["error"] = "Tavily Search sonrası Extract yedeği kullanıldı; alanlar doğrulanmalı."
+                return item
+        search_error = "Aynı ürünün PlusPower alan adındaki eşleşen arama sonucu bulunamadı."
+    except Exception as exc:
+        search_error = str(exc)[:400]
+
+    raise RuntimeError(
+        "Tavily ürün sayfasını alamadı. "
+        f"Extract hatası: {extract_error} | Search yedeği: {search_error}"
+    )
 
 def scrape_urls(urls, delay_seconds=5, callback=None, tavily_api_key=None):
     results=[]; session=requests.Session()
