@@ -4,11 +4,14 @@ import json
 from scraper.core import (
     init_db, list_products, count_products, import_sitemap,
     scrape_urls, export_csv, get_product, delete_all_products,
-    parse_pasted_product, extract_product, save_product
+    parse_pasted_product, extract_product, save_product,
+    get_selector_settings, save_selector_settings, extract_product_with_selectors,
+    test_css_selectors, init_selector_settings
 )
 
 st.set_page_config(page_title="PlusPower Product Scraper", page_icon="🛒", layout="wide")
 init_db()
+init_selector_settings()
 try:
     tavily_api_key = st.secrets.get("TAVILY_API_KEY", "")
 except Exception:
@@ -39,7 +42,7 @@ c1.metric("Kayıtlı ürün", products_count)
 c2.metric("Pilot hedefi", int(limit))
 c3.metric("Veritabanı", "SQLite")
 
-tab1, tab2, tab3, tab4 = st.tabs(["URL ile ürün ekle", "HTML / Metin aktarımı", "Ürünleri görüntüle", "Dışa aktar"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["URL ile ürün ekle", "HTML / Metin aktarımı", "Ürünleri görüntüle", "Dışa aktar", "HTML Seçici Ayarları"])
 
 with tab1:
     st.subheader("1. Sitemap'ten ürün URL'lerini keşfet")
@@ -98,7 +101,7 @@ with tab2:
             st.warning("View Source HTML kodunu yapıştır.")
         else:
             try:
-                parsed = extract_product(html_url.strip(), html_source)
+                parsed = extract_product_with_selectors(html_url.strip(), html_source)
                 parsed["error"] = "Kaynak: Kullanıcının yapıştırdığı View Source HTML. Kaydetmeden önce alanları doğrula."
                 parsed["status"] = "needs_review"
                 st.session_state["html_product"] = parsed
@@ -168,6 +171,57 @@ with tab2:
                 st.session_state.pop("pasted_product", None)
             else:
                 st.error("Kaydetmek için ürün URL'si gerekli.")
+
+
+with tab5:
+    st.subheader("HTML Seçici Ayarları")
+    st.write("PlusPower ürün sayfalarının ortak CSS class ve ID seçicilerini burada bir kez tanımla. Seçiciler gerçek HTML üzerinden test edilmelidir.")
+    selector_labels = {
+        "title": "Ürün başlığı", "brand": "Marka", "price": "Fiyat",
+        "ean": "EAN", "sku": "SKU", "availability": "Stok durumu",
+        "description": "Açıklama", "ingredients": "İçindekiler",
+        "nutrition": "Besin değerleri", "images": "Görseller",
+        "variants": "Varyantlar",
+    }
+    current_selectors = get_selector_settings()
+    with st.form("selector_settings_form"):
+        selector_inputs = {}
+        for field, label in selector_labels.items():
+            selector_inputs[field] = st.text_input(
+                label, value=current_selectors.get(field, ""),
+                placeholder=".class-name veya #element-id"
+            )
+        save_selectors = st.form_submit_button("Seçicileri kaydet", type="primary")
+    if save_selectors:
+        save_selector_settings(selector_inputs)
+        st.success("Seçiciler SQLite veritabanına kaydedildi.")
+        st.rerun()
+
+    st.divider()
+    st.subheader("Seçicileri test et")
+    selector_test_html = st.text_area(
+        "Örnek ürünün View Source HTML kodu", height=280,
+        placeholder="HTML kodunu buraya yapıştır...", key="selector_test_html"
+    )
+    if st.button("HTML seçicilerini test et"):
+        if not selector_test_html.strip():
+            st.warning("Önce test HTML kodunu yapıştır.")
+        else:
+            test_results = test_css_selectors(selector_test_html, get_selector_settings())
+            rows = []
+            for field, result in test_results.items():
+                rows.append({
+                    "Alan": selector_labels[field], "Seçici": result["selector"],
+                    "Eşleşme": result["count"], "Örnek": result["sample"],
+                    "Hata": result["error"],
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            if any(result["count"] == -1 for result in test_results.values()):
+                st.error("Hatalı CSS seçicileri var. Bunları düzeltip yeniden test et.")
+            elif not any(result["count"] > 0 for result in test_results.values()):
+                st.warning("Hiçbir seçici eşleşmedi. CSS seçicilerini kontrol et.")
+            else:
+                st.success("Seçici testi tamamlandı. Örnek değerleri kontrol et.")
 
 with tab3:
     st.subheader("Kayıtlı ürünler")
