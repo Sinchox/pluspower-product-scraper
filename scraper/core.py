@@ -236,6 +236,107 @@ def _is_cloudflare_challenge(response):
     return False
 
 
+
+def _ebay_title(title, brand="", description=""):
+    """Create an Italian eBay SEO title, strictly limited to 80 characters."""
+    title = _clean(title)
+    title = re.sub(r"(?i)\b(\d+(?:[.,]\d+)?)kg\b", r"\1 kg", title)
+    brand = _clean(brand)
+    combined = f"{brand} {title}".strip()
+    # Remove an accidental repeated brand prefix.
+    if brand and title.lower().startswith(brand.lower()):
+        combined = title
+
+    searchable = f"{title} {description}".lower()
+    keywords = []
+    if re.search(r"whey|siero del latte|proteine del siero|proteine siero", searchable):
+        if re.search(r"isolate|isolat", searchable):
+            keywords.extend(["Whey", "Proteine"])
+        elif re.search(r"concentrat", searchable):
+            keywords.extend(["Whey", "Protein"])
+        else:
+            keywords.extend(["Whey", "Proteine"])
+    elif re.search(r"creatin", searchable):
+        keywords.extend(["Creatina", "Integratore"])
+    elif re.search(r"bcaa|amino", searchable):
+        keywords.extend(["Aminoacidi", "Integratore"])
+
+    # Keep the original product name intact; add relevant search terms only
+    # when they are not already present.
+    for keyword in keywords:
+        if keyword.lower() not in combined.lower():
+            combined = f"{combined} {keyword}"
+
+    combined = re.sub(r"\s+", " ", combined).strip(" -|")
+    if len(combined) <= 80:
+        return combined
+
+    # Preserve brand, product identity and pack size when shortening.
+    tokens = combined.split()
+    kept = []
+    for token in tokens:
+        candidate = " ".join(kept + [token])
+        if len(candidate) <= 80:
+            kept.append(token)
+        else:
+            break
+    return " ".join(kept).rstrip(" -|")
+
+
+def _ebay_description(title, brand="", source_description="", ingredients="",
+                      nutrition="", ean="", sku=""):
+    """Build a factual Italian eBay description without inventing product claims."""
+    title = _clean(title)
+    brand = _clean(brand)
+    source_description = _clean(source_description)
+    source_description = re.sub(
+        r"(?i)\b(\d+(?:[.,]\d+)?)\s?kg\s+proteine\s+siero\s+isolate\s+idrolizzate\b",
+        r"Proteine del siero del latte isolate e idrolizzate, formato da \1 kg",
+        source_description,
+    )
+    source_description = re.sub(r"(?i)\b(\d+(?:[.,]\d+)?)kg\b", r"\1 kg", source_description)
+    ingredients = _clean(ingredients)
+    nutrition = _clean(nutrition)
+
+    lines = []
+    heading = " ".join(part for part in [brand, title] if part).strip()
+    if heading:
+        lines.extend([heading, ""])
+    lines.append("DESCRIZIONE")
+    if source_description:
+        lines.append(source_description.rstrip(".") + ".")
+    else:
+        lines.append(
+            "Prodotto identificato in base alle informazioni disponibili nella "
+            "scheda del fornitore. Consulta l'etichetta originale per tutti i "
+            "dettagli tecnici e le indicazioni del produttore."
+        )
+
+    lines.extend(["", "DETTAGLI DEL PRODOTTO"])
+    if brand:
+        lines.append(f"Marca: {brand}")
+    if title:
+        lines.append(f"Nome prodotto: {title}")
+    if ean:
+        lines.append(f"EAN: {ean}")
+    if sku:
+        lines.append(f"Codice prodotto: {sku}")
+
+    if ingredients:
+        lines.extend(["", "INGREDIENTI", ingredients])
+    if nutrition:
+        lines.extend(["", "VALORI NUTRIZIONALI", nutrition])
+
+    lines.extend([
+        "",
+        "INFORMAZIONI IMPORTANTI",
+        "Ingredienti, valori nutrizionali, gusto, allergeni, modalità d'uso e "
+        "avvertenze devono essere verificati sull'etichetta del prodotto ricevuto. "
+        "Le immagini e le informazioni dell'inserzione devono corrispondere "
+        "all'articolo effettivamente spedito.",
+    ])
+    return "\n".join(lines)
+
 def extract_product(url, html):
     soup = BeautifulSoup(html, "html.parser")
     product = _jsonld_product(soup)
@@ -309,10 +410,17 @@ def extract_product(url, html):
             variants.append(value)
     variants = list(dict.fromkeys(variants))
 
+    source_title = title
+    source_description = description
+    title = _ebay_title(source_title, brand, source_description)
+    description = _ebay_description(
+        source_title, brand, source_description, ingredients, nutrition, ean, sku
+    )
+
     missing = [
         key for key, value in [
             ("title", title), ("brand", brand), ("price", price),
-            ("images", images), ("description", description),
+            ("images", images), ("description", source_description),
         ] if not value
     ]
     status = "needs_review" if missing else "ready_for_review"
@@ -371,6 +479,10 @@ def parse_pasted_product(text, source_url=""):
     if match:
         brand = match.group(1).strip()
 
+    source_title = title
+    title = _ebay_title(source_title, brand, raw)
+    description = _ebay_description(source_title, brand, raw, "", "", ean, sku)
+
     return {
         "source_url": source_url.strip(),
         "title": title,
@@ -380,7 +492,7 @@ def parse_pasted_product(text, source_url=""):
         "ean": ean,
         "sku": sku,
         "availability": "",
-        "description": "",
+        "description": description,
         "image_urls": "[]",
         "ingredients": "",
         "nutrition": "",
@@ -465,6 +577,25 @@ def _parse_tavily_result(url, result):
         return ""
 
     brand = labeled([r"brand", r"marca", r"marchio", r"produttore"])
+
+    # Tavily Search may return compact ecommerce snippets instead of structured data.
+    compact_text = re.sub(r"\s+", " ", content).strip()
+    compact_match = re.search(
+        r"(?P<product>[A-Za-zÀ-ÿ0-9%&'’+.,()/-]{3,}(?:\s+[A-Za-zÀ-ÿ0-9%&'’+.,()/-]{2,}){0,8})"
+        r"\s+di\s+(?P<brand>[A-ZÀ-Ý][A-Za-zÀ-ÿ0-9&'’+.-]*(?:\s+[A-ZÀ-Ý][A-Za-zÀ-ÿ0-9&'’+.-]*){0,4})"
+        r"\s*:",
+        compact_text,
+    )
+    if compact_match:
+        if not title:
+            title = compact_match.group("product").strip(" .,:;-")
+        if not brand:
+            brand = compact_match.group("brand").strip(" .,:;-")
+        after_colon = compact_text[compact_match.end():]
+        size_match = re.search(r"\b(\d+(?:[.,]\d+)?\s?(?:kg|g|mg|ml|l))\b", after_colon, re.I)
+        if size_match and size_match.group(1).lower() not in title.lower():
+            title = f"{title} {size_match.group(1)}"
+
     price = ""
     currency = ""
     for line in lines[:100]:
@@ -487,6 +618,15 @@ def _parse_tavily_result(url, result):
         ):
             description = line
             break
+    if not description and compact_match:
+        description_text = compact_text[compact_match.end():]
+        description_text = re.split(
+            r"\s+€\s*[0-9][0-9.,]*|\s+[0-9][0-9.,]*\s*€",
+            description_text,
+            maxsplit=1,
+        )[0]
+        description_text = re.sub(r"\s+Ecommerce by.*$|\s+\d+\s+online.*$", "", description_text, flags=re.I)
+        description = description_text.strip(" .,:;-")
 
     def section(start_patterns, stop_patterns):
         start = None
@@ -522,27 +662,39 @@ def _parse_tavily_result(url, result):
         if isinstance(image, str) and image.startswith("https://")
     ]
 
+    source_title = title
+    source_description = description
+    ebay_title = _ebay_title(source_title, brand, source_description)
+    ebay_description = _ebay_description(
+        source_title, brand, source_description, ingredients, nutrition, ean, sku
+    )
+
     missing = [
         name for name, value in [
-            ("title", title), ("brand", brand), ("price", price)
+            ("title", ebay_title), ("brand", brand), ("price", price)
         ] if not value
     ]
     return {
         "source_url": url,
-        "title": title,
+        "title": ebay_title,
         "brand": brand,
         "price": price,
         "currency": currency,
         "ean": ean,
         "sku": sku,
         "availability": availability,
-        "description": description,
+        "description": ebay_description,
         "image_urls": json.dumps(images, ensure_ascii=False),
         "ingredients": ingredients,
         "nutrition": nutrition,
         "variants": "[]",
         "raw_jsonld": json.dumps(
-            {"provider": "Tavily Search", "raw_content": content},
+            {
+                "provider": "Tavily Search",
+                "source_title": source_title,
+                "source_description": source_description,
+                "raw_content": content,
+            },
             ensure_ascii=False,
         ),
         "last_checked": datetime.now(timezone.utc).isoformat(timespec="seconds"),
