@@ -1074,3 +1074,129 @@ def delete_all_products():
     con.execute("DELETE FROM products")
     con.commit()
     con.close()
+
+
+# ---------------- Configurable HTML CSS selectors ----------------
+SELECTOR_FIELDS = (
+    "title", "brand", "price", "ean", "sku", "availability",
+    "description", "ingredients", "nutrition", "images", "variants",
+)
+
+
+def init_selector_settings():
+    """Create persistent selector settings without touching product records."""
+    con = db()
+    con.execute("""CREATE TABLE IF NOT EXISTS app_settings (
+        setting_key TEXT PRIMARY KEY,
+        setting_value TEXT NOT NULL DEFAULT ''
+    )""")
+    con.commit()
+    con.close()
+
+
+def get_selector_settings():
+    init_selector_settings()
+    con = db()
+    rows = con.execute(
+        "SELECT setting_key, setting_value FROM app_settings WHERE setting_key LIKE 'selector:%'"
+    ).fetchall()
+    con.close()
+    saved = {row["setting_key"].split(":", 1)[1]: row["setting_value"] for row in rows}
+    return {field: saved.get(field, "") for field in SELECTOR_FIELDS}
+
+
+def save_selector_settings(settings):
+    init_selector_settings()
+    con = db()
+    for field in SELECTOR_FIELDS:
+        value = str(settings.get(field, "") or "").strip()
+        con.execute(
+            "INSERT INTO app_settings(setting_key, setting_value) VALUES(?, ?) "
+            "ON CONFLICT(setting_key) DO UPDATE SET setting_value=excluded.setting_value",
+            ("selector:" + field, value),
+        )
+    con.commit()
+    con.close()
+
+
+def _selector_node_value(node, field):
+    if field == "images":
+        return node.get("data-large-image") or node.get("data-src") or node.get("data-original") or node.get("src") or node.get("srcset") or node.get("content") or ""
+    if node.name == "meta":
+        return node.get("content", "")
+    if node.name in ("img", "source"):
+        return node.get("data-large-image") or node.get("data-src") or node.get("src") or node.get("srcset") or ""
+    return node.get("content") or node.get("value") or node.get_text(" ", strip=True)
+
+
+def test_css_selectors(html, selectors):
+    """Return match counts and samples for each configured CSS selector."""
+    soup = BeautifulSoup(html, "html.parser")
+    results = {}
+    for field in SELECTOR_FIELDS:
+        selector = str(selectors.get(field, "") or "").strip()
+        if not selector:
+            results[field] = {"selector": "", "count": 0, "sample": "", "error": ""}
+            continue
+        try:
+            nodes = soup.select(selector)
+            samples = [_clean(_selector_node_value(node, field))[:220] for node in nodes[:3]]
+            results[field] = {
+                "selector": selector, "count": len(nodes),
+                "sample": " | ".join(value for value in samples if value), "error": "",
+            }
+        except Exception as exc:
+            results[field] = {"selector": selector, "count": -1, "sample": "", "error": str(exc)}
+    return results
+
+
+def extract_product_with_selectors(url, html, selectors=None):
+    """Use the existing parser first, then configured CSS selectors as explicit overrides."""
+    selectors = selectors if selectors is not None else get_selector_settings()
+    item = extract_product(url, html)
+    soup = BeautifulSoup(html, "html.parser")
+
+    for field in ("title", "brand", "price", "ean", "sku", "availability", "description", "ingredients", "nutrition"):
+        selector = str(selectors.get(field, "") or "").strip()
+        if not selector:
+            continue
+        try:
+            nodes = soup.select(selector)
+        except Exception as exc:
+            raise ValueError(f"CSS seçicisi hatalı ({field}): {exc}") from exc
+        values = [_clean(_selector_node_value(node, field)) for node in nodes]
+        values = [value for value in values if value]
+        if values:
+            item[field] = values[0]
+
+    for field, output_key in (("images", "image_urls"), ("variants", "variants")):
+        selector = str(selectors.get(field, "") or "").strip()
+        if not selector:
+            continue
+        try:
+            nodes = soup.select(selector)
+        except Exception as exc:
+            raise ValueError(f"CSS seçicisi hatalı ({field}): {exc}") from exc
+        values = []
+        for node in nodes:
+            value = _clean(_selector_node_value(node, field))
+            if value and value not in values:
+                values.append(value)
+        if values:
+            if field == "images":
+                normalized = []
+                for value in values:
+                    candidate = value.split(",")[0].strip().split(" ")[0]
+                    if candidate.startswith("//"):
+                        candidate = "https:" + candidate
+                    elif candidate.startswith("/"):
+                        candidate = "https://www.pluspowersupplements.com" + candidate
+                    if candidate.startswith("https://") and candidate not in normalized:
+                        normalized.append(candidate)
+                if normalized:
+                    item[output_key] = json.dumps(normalized, ensure_ascii=False)
+            else:
+                item[output_key] = json.dumps([{"name": value} for value in values], ensure_ascii=False)
+
+    item["selector_fields_used"] = [field for field in SELECTOR_FIELDS if str(selectors.get(field, "") or "").strip()]
+    return item
