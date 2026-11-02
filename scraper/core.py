@@ -237,105 +237,205 @@ def _is_cloudflare_challenge(response):
 
 
 
-def _ebay_title(title, brand="", description=""):
-    """Create an Italian eBay SEO title, strictly limited to 80 characters."""
-    title = _clean(title)
-    title = re.sub(r"(?i)\b(\d+(?:[.,]\d+)?)kg\b", r"\1 kg", title)
-    brand = _clean(brand)
-    combined = f"{brand} {title}".strip()
-    # Remove an accidental repeated brand prefix.
-    if brand and title.lower().startswith(brand.lower()):
-        combined = title
 
-    searchable = f"{title} {description}".lower()
-    keywords = []
-    if re.search(r"whey|siero del latte|proteine del siero|proteine siero", searchable):
-        if re.search(r"isolate|isolat", searchable):
-            keywords.extend(["Whey", "Proteine"])
-        elif re.search(r"concentrat", searchable):
-            keywords.extend(["Whey", "Protein"])
-        else:
-            keywords.extend(["Whey", "Proteine"])
-    elif re.search(r"creatin", searchable):
-        keywords.extend(["Creatina", "Integratore"])
-    elif re.search(r"bcaa|amino", searchable):
-        keywords.extend(["Aminoacidi", "Integratore"])
-
-    # Keep the original product name intact; add relevant search terms only
-    # when they are not already present.
-    for keyword in keywords:
-        if keyword.lower() not in combined.lower():
-            combined = f"{combined} {keyword}"
-
-    combined = re.sub(r"\s+", " ", combined).strip(" -|")
-    if len(combined) <= 80:
-        return combined
-
-    # Preserve brand, product identity and pack size when shortening.
-    tokens = combined.split()
-    kept = []
-    for token in tokens:
-        candidate = " ".join(kept + [token])
-        if len(candidate) <= 80:
-            kept.append(token)
-        else:
-            break
-    return " ".join(kept).rstrip(" -|")
+def _meta_itemprop(soup, *names):
+    for name in names:
+        node = soup.find(attrs={"itemprop": name})
+        if node:
+            value = node.get("content") or node.get("value") or node.get_text(" ", strip=True)
+            if value:
+                return _clean(value)
+    return ""
 
 
-def _ebay_description(title, brand="", source_description="", ingredients="",
-                      nutrition="", ean="", sku=""):
-    """Build a factual Italian eBay description without inventing product claims."""
-    title = _clean(title)
-    brand = _clean(brand)
-    source_description = _clean(source_description)
-    source_description = re.sub(
-        r"(?i)\b(\d+(?:[.,]\d+)?)\s?kg\s+proteine\s+siero\s+isolate\s+idrolizzate\b",
-        r"Proteine del siero del latte isolate e idrolizzate, formato da \1 kg",
-        source_description,
-    )
-    source_description = re.sub(r"(?i)\b(\d+(?:[.,]\d+)?)kg\b", r"\1 kg", source_description)
-    ingredients = _clean(ingredients)
-    nutrition = _clean(nutrition)
+def _all_product_images(soup, product=None):
+    images = []
+    product = product or {}
+    raw = product.get("image", []) if isinstance(product, dict) else []
+    if isinstance(raw, str):
+        raw = [raw]
+    for value in raw:
+        if isinstance(value, dict):
+            value = value.get("url") or value.get("contentUrl") or ""
+        value = _clean(value)
+        if value.startswith("//"):
+            value = "https:" + value
+        if value.startswith("https://") and value not in images:
+            images.append(value)
 
-    lines = []
-    heading = " ".join(part for part in [brand, title] if part).strip()
-    if heading:
-        lines.extend([heading, ""])
-    lines.append("DESCRIZIONE")
-    if source_description:
-        lines.append(source_description.rstrip(".") + ".")
-    else:
-        lines.append(
-            "Prodotto identificato in base alle informazioni disponibili nella "
-            "scheda del fornitore. Consulta l'etichetta originale per tutti i "
-            "dettagli tecnici e le indicazioni del produttore."
-        )
+    for node in soup.select("picture source[srcset], img[srcset], img[src], img[data-src], img[data-large-image], img[data-original]"):
+        for attr in ("srcset", "data-srcset"):
+            srcset = node.get(attr, "")
+            for candidate in srcset.split(","):
+                url = candidate.strip().split(" ")[0]
+                if url.startswith("//"):
+                    url = "https:" + url
+                if url.startswith("https://") and url not in images:
+                    images.append(url)
+        for attr in ("data-large-image", "data-original", "data-src", "src"):
+            url = _clean(node.get(attr))
+            if url.startswith("//"):
+                url = "https:" + url
+            if url.startswith("https://") and url not in images:
+                images.append(url)
+    return images
 
-    lines.extend(["", "DETTAGLI DEL PRODOTTO"])
-    if brand:
-        lines.append(f"Marca: {brand}")
-    if title:
-        lines.append(f"Nome prodotto: {title}")
-    if ean:
-        lines.append(f"EAN: {ean}")
-    if sku:
-        lines.append(f"Codice prodotto: {sku}")
 
-    if ingredients:
-        lines.extend(["", "INGREDIENTI", ingredients])
-    if nutrition:
-        lines.extend(["", "VALORI NUTRIZIONALI", nutrition])
+def _find_js_object(text, variable_names):
+    """Extract a balanced JavaScript object assigned to one of the named variables."""
+    for name in variable_names:
+        match = re.search(r"(?:var|let|const)?\s*" + re.escape(name) + r"\s*[:=]\s*\{", text, re.I)
+        if not match:
+            continue
+        start = text.find("{", match.start())
+        depth = 0
+        quote = None
+        escaped = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = None
+                continue
+            if char in ("'", '"', "`"):
+                quote = char
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start:index + 1]
+    return ""
 
-    lines.extend([
-        "",
-        "INFORMAZIONI IMPORTANTI",
-        "Ingredienti, valori nutrizionali, gusto, allergeni, modalità d'uso e "
-        "avvertenze devono essere verificati sull'etichetta del prodotto ricevuto. "
-        "Le immagini e le informazioni dell'inserzione devono corrispondere "
-        "all'articolo effettivamente spedito.",
-    ])
-    return "\n".join(lines)
+
+def _parse_js_object(raw):
+    if not raw:
+        return None
+    # First try strict JSON, then a conservative conversion of common JS literals.
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+    converted = re.sub(r"([{,]\s*)([A-Za-z_$][\w$]*)\s*:", r'\1"\2":', raw)
+    converted = re.sub(r"\btrue\b", "true", converted, flags=re.I)
+    converted = re.sub(r"\bfalse\b", "false", converted, flags=re.I)
+    converted = re.sub(r"\bundefined\b", "null", converted)
+    try:
+        return json.loads(converted)
+    except Exception:
+        pass
+    try:
+        import ast
+        py = converted.replace("null", "None").replace("true", "True").replace("false", "False")
+        py = re.sub(r"'([^'\\]*(?:\\.[^'\\]*)*)'", lambda m: json.dumps(m.group(1)), py)
+        return ast.literal_eval(py)
+    except Exception:
+        return None
+
+
+def _variant_records(soup):
+    scripts = "\n".join(script.get_text(" ", strip=False) for script in soup.find_all("script"))
+    raw = _find_js_object(scripts, ("varianti", "variants", "productVariants"))
+    data = _parse_js_object(raw)
+    records = []
+
+    def walk(value, inherited=""):
+        if isinstance(value, dict):
+            # Treat objects with recognizable variant fields as variant records.
+            lowered = {str(k).lower(): v for k, v in value.items()}
+            keys = set(lowered)
+            recognizable = any(
+                token in key
+                for key in keys
+                for token in ("ean", "barcode", "codice", "sku", "variante", "gusto", "aroma", "disponibile", "quantita", "stock")
+            )
+            if recognizable:
+                def pick(*names):
+                    for key, val in lowered.items():
+                        if any(name in key for name in names) and val not in (None, ""):
+                            return _clean(val)
+                    return ""
+                name = pick("descrizione", "nome", "variante", "gusto", "aroma", "label", "valore") or inherited
+                record = {
+                    "name": name,
+                    "variant_id": pick("idvariante", "id_variante", "variantid", "id"),
+                    "product_code": pick("codice", "codprod", "cod_prodotto", "productcode", "sku"),
+                    "ean": pick("ean", "gtin", "barcode", "codiceabarre"),
+                    "stock_quantity": pick("quantita", "quantity", "giacenza", "stock", "disponibilita"),
+                    "available_online": pick("disponibileweb", "disponibile_web", "availableonline", "available"),
+                    "price": pick("prezzo", "price", "prezzoscontato", "prezzo_scontato"),
+                }
+                if any(record.values()):
+                    records.append(record)
+            for key, child in value.items():
+                if isinstance(child, (dict, list)):
+                    walk(child, _clean(key))
+        elif isinstance(value, list):
+            for child in value:
+                walk(child, inherited)
+
+    if data is not None:
+        walk(data)
+
+    # Fallback: parse individual JS object blocks if the whole object is not valid JSON.
+    if not records and raw:
+        blocks = re.findall(r"\{[^{}]{20,2000}\}", raw, re.S)
+        for block in blocks:
+            fields = {}
+            aliases = {
+                "ean": r"(?:ean|gtin|barcode)\s*[:=]\s*['\"]?(\d{8,14})",
+                "variant_id": r"(?:id_variante|idvariante|variant_id)\s*[:=]\s*['\"]?(\d+)",
+                "product_code": r"(?:codice|codprod|cod_prodotto|sku)\s*[:=]\s*['\"]?([A-Za-z0-9_-]+)",
+                "stock_quantity": r"(?:quantita|quantity|giacenza|stock)\s*[:=]\s*['\"]?(\d+)",
+            }
+            for field, pattern in aliases.items():
+                found = re.search(pattern, block, re.I)
+                fields[field] = found.group(1) if found else ""
+            if fields.get("ean"):
+                name = re.search(r"(?:nome|descrizione|gusto|variante)\s*[:=]\s*['\"]([^'\"]+)", block, re.I)
+                fields["name"] = name.group(1) if name else ""
+                fields["available_online"] = ""
+                fields["price"] = ""
+                records.append(fields)
+    # De-duplicate without collapsing distinct flavors that share other attributes.
+    unique = []
+    seen = set()
+    for item in records:
+        key = (item.get("variant_id"), item.get("ean"), item.get("product_code"), item.get("name"))
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+    return unique
+
+
+def _extract_nutrition_table(soup):
+    rows = []
+    for table in soup.find_all("table"):
+        text = _clean(table.get_text(" ", strip=True))
+        if not re.search(r"energia|energy|proteine|protein|grassi|fat|carboidrati", text, re.I):
+            continue
+        for tr in table.find_all("tr"):
+            cells = [_clean(cell.get_text(" ", strip=True)) for cell in tr.find_all(["th", "td"])]
+            if cells:
+                rows.append(" | ".join(cells))
+    return "\n".join(rows)
+
+
+def _extract_ingredients_text(soup):
+    for node in soup.select("[class*='ingredient'], [id*='ingredient'], [class*='composizione']"):
+        value = _clean(node.get_text(" ", strip=True))
+        if len(value) > 20:
+            return value
+    for node in soup.find_all(["div", "section", "p", "td"]):
+        value = _clean(node.get_text(" ", strip=True))
+        if re.match(r"^(ingredienti|ingredients|composizione)\s*[:\-]", value, re.I) and len(value) > 25:
+            return value
+    return ""
+
 
 def extract_product(url, html):
     soup = BeautifulSoup(html, "html.parser")
@@ -348,6 +448,7 @@ def extract_product(url, html):
 
     title = (
         _clean(product.get("name"))
+        or _meta_itemprop(soup, "name")
         or _first_text(soup, ["main h1", "h1.product-title", "h1"])
         or _meta(soup, "og:title")
     )
@@ -356,21 +457,28 @@ def extract_product(url, html):
 
     brand = _brand_value(product.get("brand"))
     if not brand:
+        brand = _meta_itemprop(soup, "brand")
+    if not brand:
         brand = _meta(soup, "product:brand", "brand", "og:brand")
     if not brand:
-        brand = _first_text(
-            soup, [".product-brand", "[itemprop='brand']", "a.brand", "[class*='brand-name']"]
-        )
+        brand = _first_text(soup, [".product-brand", "[itemprop='brand']", "a.brand", "[class*='brand-name']"])
 
-    price = _clean(offers.get("price") or _meta(soup, "product:price:amount"))
-    currency = _clean(
-        offers.get("priceCurrency") or _meta(soup, "product:price:currency")
+    price = (
+        _clean(offers.get("price"))
+        or _meta_itemprop(soup, "price")
+        or _meta(soup, "product:price:amount")
     )
-    availability = _clean(offers.get("availability"))
-    sku = _clean(product.get("sku") or _meta(soup, "product:retailer_item_id"))
+    currency = (
+        _clean(offers.get("priceCurrency"))
+        or _meta_itemprop(soup, "priceCurrency")
+        or _meta(soup, "product:price:currency")
+        or ("EUR" if price else "")
+    )
+    availability = _clean(offers.get("availability") or _meta_itemprop(soup, "availability"))
+    sku = _clean(product.get("sku") or _meta_itemprop(soup, "sku") or _meta(soup, "product:retailer_item_id"))
     ean = _clean(
         product.get("gtin13") or product.get("gtin14") or product.get("gtin12")
-        or product.get("gtin8") or product.get("gtin")
+        or product.get("gtin8") or product.get("gtin") or _meta_itemprop(soup, "gtin13", "gtin")
     )
     description = (
         _clean(product.get("description"))
@@ -378,71 +486,60 @@ def extract_product(url, html):
         or _first_text(soup, [".product-description", ".description"])
     )
 
-    images = product.get("image", []) if isinstance(product, dict) else []
-    if isinstance(images, str):
-        images = [images]
-    if not images:
-        images = []
-        for selector in ["main img", "img.product-image", "img[itemprop='image']"]:
-            for img in soup.select(selector):
-                src = img.get("src") or img.get("data-src") or img.get("data-large-image")
-                if src and src.startswith("http") and src not in images:
-                    images.append(src)
-
-    nutrition = _extract_labeled_section(
-        soup,
-        ["valori nutrizionali", "informazioni nutrizionali", "nutrition facts",
-         "nutritional information"],
-    )
-    ingredients = _extract_labeled_section(
+    images = _all_product_images(soup, product)
+    ingredients = _extract_ingredients_text(soup) or _extract_labeled_section(
         soup, ["ingredienti", "ingredients", "composizione"]
     )
+    nutrition = _extract_nutrition_table(soup) or _extract_labeled_section(
+        soup, ["valori nutrizionali", "informazioni nutrizionali", "nutrition facts", "nutritional information"]
+    )
+    variants = _variant_records(soup)
 
-    variants = []
-    for node in soup.select(
-        "select option, [data-attribute], .swatch, .variant-option"
-    ):
-        value = _clean(
-            node.get("value") or node.get("data-attribute")
-            or node.get_text(" ", strip=True)
-        )
-        if value and value.lower() not in ("select", "seleziona", "choose", "scegli"):
-            variants.append(value)
-    variants = list(dict.fromkeys(variants))
+    # If the page-level SKU/EAN duplicates one variant's code, keep it in the
+    # variant record and avoid presenting it as a universal product identifier.
+    variant_eans = {v.get("ean") for v in variants if v.get("ean")}
+    if ean in variant_eans and len(variant_eans) > 1:
+        ean = ""
+    variant_codes = {v.get("product_code") for v in variants if v.get("product_code")}
+    if sku in variant_codes and len(variant_codes) > 1:
+        sku = ""
 
     source_title = title
     source_description = description
-    title = _ebay_title(source_title, brand, source_description)
-    description = _ebay_description(
+    ebay_title = _ebay_title(source_title, brand, source_description)
+    ebay_description = _ebay_description(
         source_title, brand, source_description, ingredients, nutrition, ean, sku
     )
 
     missing = [
         key for key, value in [
-            ("title", title), ("brand", brand), ("price", price),
-            ("images", images), ("description", source_description),
+            ("title", source_title), ("brand", brand), ("price", price), ("images", images),
+            ("description", source_description),
         ] if not value
     ]
     status = "needs_review" if missing else "ready_for_review"
 
     return {
         "source_url": url,
-        "title": title,
+        "title": ebay_title,
         "brand": brand,
         "price": price,
         "currency": currency,
         "ean": ean,
         "sku": sku,
         "availability": availability,
-        "description": description,
+        "description": ebay_description,
         "image_urls": json.dumps(images, ensure_ascii=False),
         "ingredients": ingredients,
         "nutrition": nutrition,
         "variants": json.dumps(variants, ensure_ascii=False),
-        "raw_jsonld": json.dumps(product, ensure_ascii=False),
+        "raw_jsonld": json.dumps(
+            {"jsonld_product": product, "parser": "pluspower_html_schema_variants_v2"},
+            ensure_ascii=False,
+        ),
         "last_checked": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "status": status,
-        "error": ("Eksik alanlar: " + ", ".join(missing)) if missing else "",
+        "error": ("Kaynak: doğrudan HTML. " + ("Eksik alanlar: " + ", ".join(missing) if missing else "Temel alanlar bulundu; varyant ve stok bilgilerini doğrula.")),
     }
 
 
@@ -479,10 +576,6 @@ def parse_pasted_product(text, source_url=""):
     if match:
         brand = match.group(1).strip()
 
-    source_title = title
-    title = _ebay_title(source_title, brand, raw)
-    description = _ebay_description(source_title, brand, raw, "", "", ean, sku)
-
     return {
         "source_url": source_url.strip(),
         "title": title,
@@ -492,7 +585,7 @@ def parse_pasted_product(text, source_url=""):
         "ean": ean,
         "sku": sku,
         "availability": "",
-        "description": description,
+        "description": "",
         "image_urls": "[]",
         "ingredients": "",
         "nutrition": "",
@@ -577,25 +670,6 @@ def _parse_tavily_result(url, result):
         return ""
 
     brand = labeled([r"brand", r"marca", r"marchio", r"produttore"])
-
-    # Tavily Search may return compact ecommerce snippets instead of structured data.
-    compact_text = re.sub(r"\s+", " ", content).strip()
-    compact_match = re.search(
-        r"(?P<product>[A-Za-zÀ-ÿ0-9%&'’+.,()/-]{3,}(?:\s+[A-Za-zÀ-ÿ0-9%&'’+.,()/-]{2,}){0,8})"
-        r"\s+di\s+(?P<brand>[A-ZÀ-Ý][A-Za-zÀ-ÿ0-9&'’+.-]*(?:\s+[A-ZÀ-Ý][A-Za-zÀ-ÿ0-9&'’+.-]*){0,4})"
-        r"\s*:",
-        compact_text,
-    )
-    if compact_match:
-        if not title:
-            title = compact_match.group("product").strip(" .,:;-")
-        if not brand:
-            brand = compact_match.group("brand").strip(" .,:;-")
-        after_colon = compact_text[compact_match.end():]
-        size_match = re.search(r"\b(\d+(?:[.,]\d+)?\s?(?:kg|g|mg|ml|l))\b", after_colon, re.I)
-        if size_match and size_match.group(1).lower() not in title.lower():
-            title = f"{title} {size_match.group(1)}"
-
     price = ""
     currency = ""
     for line in lines[:100]:
@@ -618,15 +692,6 @@ def _parse_tavily_result(url, result):
         ):
             description = line
             break
-    if not description and compact_match:
-        description_text = compact_text[compact_match.end():]
-        description_text = re.split(
-            r"\s+€\s*[0-9][0-9.,]*|\s+[0-9][0-9.,]*\s*€",
-            description_text,
-            maxsplit=1,
-        )[0]
-        description_text = re.sub(r"\s+Ecommerce by.*$|\s+\d+\s+online.*$", "", description_text, flags=re.I)
-        description = description_text.strip(" .,:;-")
 
     def section(start_patterns, stop_patterns):
         start = None
@@ -662,39 +727,27 @@ def _parse_tavily_result(url, result):
         if isinstance(image, str) and image.startswith("https://")
     ]
 
-    source_title = title
-    source_description = description
-    ebay_title = _ebay_title(source_title, brand, source_description)
-    ebay_description = _ebay_description(
-        source_title, brand, source_description, ingredients, nutrition, ean, sku
-    )
-
     missing = [
         name for name, value in [
-            ("title", ebay_title), ("brand", brand), ("price", price)
+            ("title", title), ("brand", brand), ("price", price)
         ] if not value
     ]
     return {
         "source_url": url,
-        "title": ebay_title,
+        "title": title,
         "brand": brand,
         "price": price,
         "currency": currency,
         "ean": ean,
         "sku": sku,
         "availability": availability,
-        "description": ebay_description,
+        "description": description,
         "image_urls": json.dumps(images, ensure_ascii=False),
         "ingredients": ingredients,
         "nutrition": nutrition,
         "variants": "[]",
         "raw_jsonld": json.dumps(
-            {
-                "provider": "Tavily Search",
-                "source_title": source_title,
-                "source_description": source_description,
-                "raw_content": content,
-            },
+            {"provider": "Tavily Search", "raw_content": content},
             ensure_ascii=False,
         ),
         "last_checked": datetime.now(timezone.utc).isoformat(timespec="seconds"),
