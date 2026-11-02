@@ -1200,3 +1200,6 @@ def extract_product_with_selectors(url, html, selectors=None):
 
     item["selector_fields_used"] = [field for field in SELECTOR_FIELDS if str(selectors.get(field, "") or "").strip()]
     return item
+
+from .pluspower_parser_patch import install_pluspower_patch
+install_pluspower_patch(globals())
