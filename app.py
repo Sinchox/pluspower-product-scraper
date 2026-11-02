@@ -1,8 +1,10 @@
 import streamlit as st
 import pandas as pd
+import json
 from scraper.core import (
     init_db, list_products, count_products, import_sitemap,
-    scrape_urls, export_csv, get_product, delete_all_products, parse_pasted_product, save_product
+    scrape_urls, export_csv, get_product, delete_all_products,
+    parse_pasted_product, extract_product, save_product
 )
 
 st.set_page_config(page_title="PlusPower Product Scraper", page_icon="🛒", layout="wide")
@@ -29,7 +31,7 @@ with st.sidebar:
     sitemap_url = st.text_input("Sitemap URL", "https://www.pluspowersupplements.com/sitemap.xml")
     delay = st.number_input("İstekler arası bekleme (saniye)", min_value=5, max_value=60, value=5, step=1)
     limit = st.number_input("Pilot ürün sayısı", min_value=1, max_value=100, value=10, step=1)
-    st.caption("Varsayılan bekleme 5 saniyedir. 403 durumunda yapılandırılmış Tavily Extract yedeği denenir; erişim kısıtlaması aşılmaz.")
+    st.caption("Cloudflare erişimi engellerse sayfanın View Source HTML kodunu HTML aktarım bölümünden yapıştırabilirsin.")
 
 products_count = count_products()
 c1,c2,c3 = st.columns(3)
@@ -37,7 +39,7 @@ c1.metric("Kayıtlı ürün", products_count)
 c2.metric("Pilot hedefi", int(limit))
 c3.metric("Veritabanı", "SQLite")
 
-tab1, tab2, tab3, tab4 = st.tabs(["URL ile ürün ekle", "Metin aktarımı", "Ürünleri görüntüle", "Dışa aktar"])
+tab1, tab2, tab3, tab4 = st.tabs(["URL ile ürün ekle", "HTML / Metin aktarımı", "Ürünleri görüntüle", "Dışa aktar"])
 
 with tab1:
     st.subheader("1. Sitemap'ten ürün URL'lerini keşfet")
@@ -72,8 +74,8 @@ with tab1:
 
     st.divider()
     st.subheader("2. Ürün URL'si ile otomatik aktarım")
-    st.caption("Tavily anahtarı bağlıysa doğrudan erişim 403 verdiğinde Extract API yedek kaynak olarak denenir.")
-    manual = st.text_area("Ürün URL'lerini gir (her satıra bir URL)", placeholder="https://www.pluspowersupplements.com/100-whey-isolate-1816gr")
+    st.caption("Uygulama doğrudan HTML'yi okur; erişim engellenirse Tavily yedeğini deneyebilir.")
+    manual = st.text_area("Ürün URL'lerini gir (her satıra bir URL)", placeholder="https://www.pluspowersupplements.com/100-hydro-isolate-2kg")
     if st.button("Manuel linkleri tara"):
         manual_urls = [x.strip() for x in manual.splitlines() if x.strip()]
         if not manual_urls:
@@ -85,44 +87,87 @@ with tab1:
             st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
 
 with tab2:
-    st.subheader("İsteğe bağlı metin aktarımı")
-    st.write("Bu bölüm yalnızca URL ile erişim mümkün olmadığında yedek yöntemdir. Ana yöntem ürün URL’sini otomatik analiz etmektir.")
-    pasted_url = st.text_input("Ürün sayfasının URL'si", placeholder="https://www.pluspowersupplements.com/100-whey-isolate-1816gr")
-    pasted_text = st.text_area("Kopyalanan ürün metni", height=320, placeholder="Ürün sayfasındaki metni buraya yapıştır...")
-    if st.button("Metni analiz et", type="primary"):
-        if not pasted_text.strip():
-            st.warning("Önce ürün sayfasından kopyaladığın metni yapıştır.")
+    st.subheader("View Source HTML ile ürün aktarımı")
+    st.write("PlusPower ürün sayfasını Safari'de aç, View Source içeriğinin tamamını kopyala ve aşağıya yapıştır. HTML içindeki ürün şeması, varyantlar, EAN, stok ve görseller ayrıştırılır.")
+    html_url = st.text_input("Ürün sayfasının URL'si", placeholder="https://www.pluspowersupplements.com/100-hydro-isolate-2kg", key="html_product_url")
+    html_source = st.text_area("View Source HTML kodu", height=360, placeholder="<!doctype html> ...", key="html_source_input")
+    if st.button("HTML kodunu analiz et", type="primary"):
+        if not html_url.strip():
+            st.warning("Ürün URL'sini gir.")
+        elif not html_source.strip():
+            st.warning("View Source HTML kodunu yapıştır.")
         else:
-            parsed = parse_pasted_product(pasted_text, pasted_url)
-            st.session_state["pasted_product"] = parsed
-            st.warning("Metin analiz edildi; otomatik doğrulanmış sayılmaz. Kaydetmeden önce alanları kontrol et.")
-    parsed = st.session_state.get("pasted_product")
+            try:
+                parsed = extract_product(html_url.strip(), html_source)
+                parsed["error"] = "Kaynak: Kullanıcının yapıştırdığı View Source HTML. Kaydetmeden önce alanları doğrula."
+                parsed["status"] = "needs_review"
+                st.session_state["html_product"] = parsed
+                st.success("HTML analiz edildi. Bulunan alanları kontrol et.")
+            except Exception as e:
+                st.error(f"HTML analiz edilemedi: {e}")
+
+    parsed = st.session_state.get("html_product")
     if parsed:
         st.markdown("#### Bulunan ürün bilgileri")
         col1, col2 = st.columns(2)
         with col1:
-            edit_title = st.text_input("Ürün adı", value=parsed.get("title", ""))
-            edit_brand = st.text_input("Marka", value=parsed.get("brand", ""))
-            edit_price = st.text_input("Fiyat (€)", value=parsed.get("price", ""))
-            edit_ean = st.text_input("EAN", value=parsed.get("ean", ""))
-            edit_sku = st.text_input("Ürün kodu / SKU", value=parsed.get("sku", ""))
+            edit_title = st.text_input("Ürün adı", value=parsed.get("title", ""), key="html_edit_title")
+            edit_brand = st.text_input("Marka", value=parsed.get("brand", ""), key="html_edit_brand")
+            edit_price = st.text_input("Fiyat (€)", value=parsed.get("price", ""), key="html_edit_price")
+            edit_currency = st.text_input("Para birimi", value=parsed.get("currency", "EUR"), key="html_edit_currency")
+            edit_ean = st.text_input("Genel EAN (varyant EAN'leri aşağıda)", value=parsed.get("ean", ""), key="html_edit_ean")
+            edit_sku = st.text_input("Genel SKU", value=parsed.get("sku", ""), key="html_edit_sku")
         with col2:
-            edit_url = st.text_input("Kaynak URL", value=parsed.get("source_url", ""))
-            st.caption("Stok, görseller ve varyantlar kopyalanan metinde yoksa boş kalır.")
-        edit_description = st.text_area("Açıklama", value=parsed.get("description", ""), height=130)
-        edit_ingredients = st.text_area("İçindekiler", value=parsed.get("ingredients", ""), height=130)
-        edit_nutrition = st.text_area("Besin değerleri", value=parsed.get("nutrition", ""), height=180)
-        if st.button("Ürünü veritabanına kaydet"):
-            parsed.update({"title": edit_title, "brand": edit_brand, "price": edit_price,
-                           "ean": edit_ean, "sku": edit_sku, "source_url": edit_url,
-                           "description": edit_description, "ingredients": edit_ingredients,
-                           "nutrition": edit_nutrition, "status": "needs_review"})
-            if not edit_url.strip():
-                st.error("Kaydetmek için ürün URL'si gerekli.")
-            else:
-                save_product(parsed)
-                st.success("Ürün kaydedildi. Ürünleri görüntüle bölümünde bulabilirsin.")
+            edit_url = st.text_input("Kaynak URL", value=parsed.get("source_url", ""), key="html_edit_url")
+            edit_availability = st.text_input("Genel stok durumu", value=parsed.get("availability", ""), key="html_edit_availability")
+            st.caption("Varyant EAN ve stokları ayrı JSON alanında saklanır.")
+        edit_description = st.text_area("Açıklama", value=parsed.get("description", ""), height=130, key="html_edit_description")
+        edit_ingredients = st.text_area("İçindekiler", value=parsed.get("ingredients", ""), height=130, key="html_edit_ingredients")
+        edit_nutrition = st.text_area("Besin değerleri", value=parsed.get("nutrition", ""), height=180, key="html_edit_nutrition")
+        edit_images = st.text_area("Görsel URL'leri (JSON)", value=parsed.get("image_urls", "[]"), height=100, key="html_edit_images")
+        edit_variants = st.text_area("Aroma / varyant bilgileri (JSON)", value=parsed.get("variants", "[]"), height=180, key="html_edit_variants")
+        if st.button("HTML ürününü veritabanına kaydet", type="primary"):
+            try:
+                json.loads(edit_images or "[]")
+                json.loads(edit_variants or "[]")
+                parsed.update({
+                    "title": edit_title, "brand": edit_brand, "price": edit_price,
+                    "currency": edit_currency, "ean": edit_ean, "sku": edit_sku,
+                    "source_url": edit_url, "availability": edit_availability,
+                    "description": edit_description, "ingredients": edit_ingredients,
+                    "nutrition": edit_nutrition, "image_urls": edit_images,
+                    "variants": edit_variants, "status": "needs_review",
+                    "error": "Kaynak: Kullanıcının yapıştırdığı View Source HTML. Manuel doğrulama gerekli."
+                })
+                if not edit_url.strip():
+                    st.error("Kaydetmek için ürün URL'si gerekli.")
+                else:
+                    save_product(parsed)
+                    st.success("Ürün HTML verileriyle kaydedildi. Ürünleri görüntüle bölümünde bulabilirsin.")
+                    st.session_state.pop("html_product", None)
+            except json.JSONDecodeError:
+                st.error("Görsel veya varyant JSON alanlarından biri geçersiz. Köşeli parantezleri ve virgülleri kontrol et.")
+
+    st.divider()
+    st.subheader("Düz metin aktarımı (eski yöntem)")
+    pasted_url = st.text_input("Ürün URL'si", placeholder="https://www.pluspowersupplements.com/product-url", key="plain_product_url")
+    pasted_text = st.text_area("Kopyalanan ürün metni", height=150, placeholder="Ürün sayfasındaki metni buraya yapıştır...", key="plain_product_text")
+    if st.button("Düz metni analiz et"):
+        if not pasted_text.strip():
+            st.warning("Önce ürün metnini yapıştır.")
+        else:
+            st.session_state["pasted_product"] = parse_pasted_product(pasted_text, pasted_url)
+            st.warning("Metin analiz edildi; alanları kaydetmeden önce kontrol et.")
+    plain = st.session_state.get("pasted_product")
+    if plain:
+        st.json(plain)
+        if st.button("Düz metin ürününü kaydet"):
+            if plain.get("source_url"):
+                save_product(plain)
+                st.success("Ürün kaydedildi.")
                 st.session_state.pop("pasted_product", None)
+            else:
+                st.error("Kaydetmek için ürün URL'si gerekli.")
 
 with tab3:
     st.subheader("Kayıtlı ürünler")
